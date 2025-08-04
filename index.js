@@ -1,9 +1,12 @@
 // const emojiRegex = require('emoji-regex');
-const { App, ExpressReceiver } = require('@slack/bolt');
+import pkg from '@slack/bolt';
+import axios from 'axios';
 // const express = require('express');
-const axios = require('axios');
+import dotenv from 'dotenv';
+import { eld } from 'eld';
 
-require('dotenv').config();
+const { App, ExpressReceiver } = pkg;
+dotenv.config();
 
 const FLAG_LANG_MAP = {
   'flag-jp': 'JA',
@@ -12,18 +15,35 @@ const FLAG_LANG_MAP = {
   'flag-us': 'EN'
 };
 
+var glossaryList = [];
+
 const receiver = new ExpressReceiver({
   signingSecret: process.env.SLACK_SIGNING_SECRET,
 });
 
-async function translateText(text, targetLang) {
-  const res = await axios.post('https://api-free.deepl.com/v2/translate', null, {
-    params: {
-      auth_key: process.env.DEEPL_API_KEY,
-      text,
-      target_lang: targetLang
-    }
-  });
+async function translateText(text, sourceLang, targetLang) {
+
+  var res = "";
+  if (glossaryList.length > 0) {
+    res = await axios.post('https://api-free.deepl.com/v2/translate', null, {
+      params: {
+        auth_key: process.env.DEEPL_API_KEY,
+        text,
+        source_lang: sourceLang,
+        target_lang: targetLang,
+        glossary_id: glossaryList[0].glossary_id
+      }
+    });
+  } else {
+      res = await axios.post('https://api-free.deepl.com/v2/translate', null, {
+        params: {
+          auth_key: process.env.DEEPL_API_KEY,
+          text,
+          target_lang: targetLang
+        }
+      });
+  }
+
 
   const translationData = res.data.translations[0];
   return {
@@ -49,16 +69,33 @@ const app = new App({
 //   res.status(200).end();
 // });
 
+async function getAllGlossaries() {
+  try {
+    const response = await axios.get('https://api-free.deepl.com/v3/glossaries', {
+      headers: {
+        'Authorization': `DeepL-Auth-Key ${process.env.DEEPL_API_KEY}`
+      }
+    });
+
+    const glossaries = response.data.glossaries;
+    console.log('Available glossaries:', glossaries);
+    return glossaries;
+  } catch (error) {
+    console.error('Failed to fetch glossaries:', error.message);
+    return [];
+  }
+}
+
 // Reaction added event
 app.event('reaction_added', async ({ event, client }) => {
     const emojiKey = 'flag-' + event.reaction;
-    const lang = FLAG_LANG_MAP[emojiKey];
+    const targetLang = FLAG_LANG_MAP[emojiKey];
 
     console.log(event);
-    console.log(lang);
+    console.log(targetLang);
 
     // Only continue if the flag is in our list
-    if (!lang) return;
+    if (!targetLang) return;
 
     try {
         // 1. Get the original message
@@ -72,18 +109,20 @@ app.event('reaction_added', async ({ event, client }) => {
         const message = result.messages[0];
         const originalText = message.text;
 
-        console.log(message);
+        console.log(originalText);
+
+        console.log(eld.detect(originalText));
 
         if (!originalText || originalText.trim() === '') return;
 
         console.log('translating');
 
         // 2. Translate via DeepL API
-        const { translatedText, detectedSourceLang } = await translateText(originalText, lang);
+        const { translatedText, detectedSourceLang } = await translateText(originalText, eld.detect(originalText).language.toUpperCase(), targetLang);
 
         // 3. Skip if already in target language
-        if (detectedSourceLang.toUpperCase() === lang.toUpperCase()) {
-            console.log(`🔁 Skipping: Already in ${lang}`);
+        if (detectedSourceLang.toUpperCase() === targetLang.toUpperCase()) {
+            console.log(`🔁 Skipping: Already in ${targetLang}`);
             return;
         }
 
@@ -91,7 +130,7 @@ app.event('reaction_added', async ({ event, client }) => {
         await client.chat.postMessage({
         channel: event.item.channel,
         thread_ts: event.item.ts,
-        text: `🌐 *Translated (${lang}):*\n${translatedText}`
+        text: `🌐 *Translated (${targetLang}):*\n${translatedText}`
         });
 
         } catch (err) {
@@ -104,4 +143,5 @@ app.event('reaction_added', async ({ event, client }) => {
 (async () => {
   await app.start(process.env.PORT || 3000);
   console.log('⚡️ Flag Emoji Bot is running!');
+  glossaryList = await getAllGlossaries();
 })();
